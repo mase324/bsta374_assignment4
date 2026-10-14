@@ -23,7 +23,7 @@ format:
     code-overflow: wrap
 prefer-html: true
 execute:
-  eval: false
+  eval: true
   echo: true
 ---
 
@@ -559,7 +559,7 @@ summary(nb)
 
 lw <- nb2listw(nb, style = "W")
 
-lw$weights[[i_leh]] 
+lw$weights 
 
 ```
 

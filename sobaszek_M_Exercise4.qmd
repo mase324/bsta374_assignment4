@@ -23,7 +23,7 @@ format:
     code-overflow: wrap
 prefer-html: true
 execute:
-  eval: false
+  eval: true
   echo: true
 ---
 
@@ -559,7 +559,7 @@ summary(nb)
 
 lw <- nb2listw(nb, style = "W")
 
-lw$weights[[i_leh]] 
+lw$weights
 
 ```
 
@@ -572,7 +572,6 @@ mc <- moran.mc(pa_covid$SMR, lw, nsim = 999)
 mc
 
 -1 / (nrow(pa_covid) - 1)          # expectation under the null
-##This is the expected value of Moran's I under random spatial arrangement, not exactly zero.
 
 hist(mc$res, breaks = 40, main = "Permutation distribution of I", xlab = "I")
 abline(v = mc$statistic, col = "red", lwd = 2)
