@@ -1,0 +1,652 @@
+---
+title: "Exercise 4 --- Aggregated Data and Global Spatial Autocorrelation"
+subtitle: "BSTA 374 · 17.5 points · Due Wednesday, October 14, 2026, 11:59 pm"
+author: "Maggie Sobaszek · Lehigh University"
+date: last-modified
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    toc-title: "On this page"
+    number-sections: false
+    code-copy: true
+    highlight-style: github
+    embed-resources: true
+  pdf:
+    papersize: letter
+    geometry:
+      - margin=1in
+    toc: false
+    colorlinks: true
+    code-overflow: wrap
+prefer-html: true
+execute:
+  eval: false
+  echo: true
+---
+
+## What this exercise is
+
+Exercises 1--3 ran on data that shipped inside an R package. This one does not.
+You will work with **real surveillance data** --- COVID-19 deaths in the 67
+counties of Pennsylvania --- and assemble the analysis dataset yourself, the way
+you would in a health department: a table of counts from one source, county
+boundaries from another, and a join between them that has to be checked rather
+than trusted.
+
+From there the exercise follows the sequence of the last two weeks:
+
+1. join and project the data;
+2. compute crude rates, **expected counts**, and the **standardized mortality
+   ratio (SMR)**;
+3. map the SMR honestly --- which, for a ratio, is not the same as mapping a rate;
+4. build a spatial weights matrix and ask, with **global Moran's I**, whether
+   the SMRs are spatially structured or could plausibly be arranged at random.
+
+It is worth 17.5 points and carries more weight than the first two exercises.
+Start early: Part A is where most of the unexpected problems will be.
+
+::: {.callout-important}
+## Submission
+Render the exercise as a page of your course site and push it to GitHub, as for
+Exercises 2 and 3. Then submit to Course Site:
+
+- `LASTNAME_FI_Exercise4.qmd` --- the source
+- the URL of the rendered page on your GitHub Pages site
+
+Example: `DELMELLE_EM_Exercise4.qmd`. Put your name in the document header.
+
+**Due Wednesday, October 14, 2026 at 11:59 pm.** Late work loses 20% per day
+unless you arrange something with me in advance.
+:::
+
+::: {.callout-warning}
+## Reproducibility is graded
+Restart R and render from a clean session before you submit. The CSV must be in
+your repository (put it in a `data/` folder) and be read with a **relative
+path** --- `read_csv("data/...")`, never `C:/Users/...` --- or the document will
+not render on my machine.
+:::
+
+---
+
+## The data
+
+**Counts.** `pa_covid_deaths_2020.csv` is posted on Course Site. It is a
+subset of the **Johns Hopkins University CSSE COVID-19 Data Repository**
+(`time_series_covid19_deaths_US.csv`), the source behind the JHU dashboard that
+was the most widely used COVID-19 tracker in the United States until the project
+stopped updating in March 2023. The repository compiles counts reported by state
+health departments --- here, the Pennsylvania Department of Health --- and
+attributes deaths to the county of residence.
+
+| Column | Meaning |
+|---|---|
+| `UID`, `FIPS` | JHU identifier; county FIPS code |
+| `Admin2` | County name |
+| `Province_State` | State |
+| `Population` | County population (U.S. Census Bureau 2019 estimate, as carried in the JHU file) |
+| `deaths_2020` | Cumulative COVID-19 deaths reported through December 31, 2020 |
+
+Cite the source in your document as: Dong, E., Du, H., & Gardner, L. (2020). An
+interactive web-based dashboard to track COVID-19 in real time. *The Lancet
+Infectious Diseases, 20*(5), 533--534, together with the repository URL:
+<https://github.com/CSSEGISandData/COVID-19>.
+
+**Boundaries.** County polygons come from the U.S. Census Bureau's
+**cartographic boundary files**, downloaded inside your document with the
+`tigris` package. Install it once, in the console --- `install.packages(c("tigris", "ggrepel"))`
+--- not inside the document.
+
+::: {.callout-note}
+## Why 2020
+Calendar year 2020 is the first pandemic year and the period before vaccines
+were available. Treat the population as the population at risk for one year.
+:::
+
+```{r}
+#| label: setup
+
+library(sf)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(classInt)
+library(patchwork)        #maps side by side
+library(leaflet)
+library(spdep)
+library(ggrepel)            # non-overlapping labels
+library(tigris)
+options(tigris_use_cache = TRUE)   # download once, then reuse
+
+covid <- read_csv("data/pa_covid_deaths_2020.csv")
+pa    <- counties(state = "PA", cb = TRUE, year = 2020)
+```
+
+---
+
+## Part A --- Assemble the dataset (3 points)
+
+1. Inspect both objects. How many rows does `covid` have, and how many polygons
+   does `pa` have? The two numbers differ. Find the rows responsible and say in
+   one sentence what they are and why they cannot be mapped.
+
+**There are 69 rows in 'covid', but 'pa' has 67 polygons. In 'covid' there is FIPS 80042, which is 'Out of PA' and UID 90042, which is 'unassigned' with no population, no deaths, and no geography.**  
+
+2. Identify the column in each object that identifies a county. Show what the
+   values look like in each, and say why they will not match as they stand.
+**In 'covid', FIPS identifies counties, and is a number. In 'pa' it is the column 'GEOID' that identifies counties and its values are characters. In 'covid', it looks like 42001, but in 'pa' it is "42001". They won't join because they need to be the same type of input.**  
+
+
+3. Create a join key in `covid` that matches the one in `pa`, then **join the
+   counts onto the polygons**. Show, with code, that every one of the 67 counties
+   received a count --- do not just look at the map.
+
+4. In two or three sentences: why join the table onto the polygons
+   (`left_join(pa, covid)`) rather than the other way around, and what would an
+   **inner** join have hidden from you if the key had been only partly wrong?
+
+**COVID data was used to join onto 'pa' to keep all 67 counties in the map, even if some counties do not have matching COVID data. If an inner join was used then any counties without a match would be removed completely. This could hide problems with the join because we might not notice that some counties were missing from the dataset. We add 'covid' to match the data from 'pa' since 'pa' data has information on all PA counties, whereas 'covid' only has data on counties with COVID cases.**
+
+::: {.callout-tip}
+Run the obvious join first, `left_join(pa, covid, by = c("GEOID" = "FIPS"))`,
+and read the error message carefully. It tells you exactly what is wrong.
+A FIPS code is an **identifier**, not a number: `42001` and `42001.0` are the same
+number but not the same identifier, and a county such as `01001` in Alabama
+would lose its leading zero.
+:::
+
+### Starting code
+
+```{r}
+#| label: a-starter
+
+
+
+# A1
+covid
+pa
+nrow(covid); nrow(pa)
+
+# rows in the table with no polygon to go to (names are good enough to look)
+anti_join(covid, st_drop_geometry(pa), by = c("Admin2" = "NAME"))
+```
+
+
+
+```{r}
+#| label: A-2
+
+# A2 -- what type is each key?
+str(covid$FIPS)
+str(pa$GEOID)
+
+```
+
+
+```{r}
+#| label: A-3
+
+# A3 -- a five-character, zero-padded text key
+covid <- covid |>
+  mutate(GEOID = sprintf("%05d", as.integer(FIPS)))
+
+pa_covid <- pa |>
+  left_join(covid, by = "GEOID")
+
+# prove the join worked
+sum(is.na(pa_covid$deaths_2020))
+
+nrow(pa_covid)
+```
+
+---
+
+## Part B --- Coordinate reference system (1.5 points)
+
+1. What CRS do the Census boundaries arrive in? Geographic or projected?
+**The boundaries are geographic.**
+
+2. Transform `pa_covid` to a **projected** CRS appropriate for the whole state,
+   and state its EPSG code. Pennsylvania is split between two State Plane zones
+   (North and South) and two UTM zones, so the obvious choices each cover only
+   part of the state --- say what you chose and why it is acceptable for a
+   statewide map.
+
+**I would transform into EPSG 5070 because it covers contiguous states, is intended for data analysis, and is in meters. Unlike State Plane Coordinate System, it doesn't split Pennsylvania into two zones.**
+
+3. One sentence: which of the operations in this exercise actually depend on the
+   projection, and which do not?
+**The projection affects how the counties appear on the map and any distance-based spatial calculations, but it doesnt affect joining the data, calculating mortality rates or SMRs, or Moran's I when using the same county neighbors.**
+
+### Starting code
+
+```{r}
+#| label: b-starter
+
+st_crs(pa_covid)$input
+st_is_longlat(pa_covid)
+st_crs(pa_covid)
+```
+
+
+```{r}
+#| label: B-2
+
+
+pa_covid <- st_transform(pa_covid, 5070)
+st_is_longlat(pa_covid)
+```
+
+---
+
+## Part C --- Counts, rates, expected counts, and the SMR (4.5 points)
+
+1. Compute the **crude COVID-19 mortality rate per 100,000** for 2020 in every
+   county. Report the three highest and three lowest.
+**The three highest counties are Mifflin, Northumberland, and Bedford. The lowest are Wayne, Forest, and Greene.**
+
+2. Make two quick static maps with `ggplot2`, placed side by side: the **number
+   of deaths** as **proportional symbols**, and the **crude rate** as a
+   choropleth with a sequential, colour-blind-safe palette. Both need a legend
+   title with units. In two or three sentences: why is a count shown with
+   symbols rather than a choropleth, which counties stand out on each map, and
+   why do the two maps tell different stories?
+**For the map that shows counts of death, Allegheny county and counties in Southeastern PA, around Philadelphia county, appear to have a very large amount of deaths. But in the choropleth, it's Mifflin, Northumberland, and Bedford that have the highest rates. Because counties with larger populations are likely to higher have cases, these counties look to have worse COVID cases because their populations are higher. Looking at crude rate allows us to see the amount of cases in comparison to their populations.**
+
+
+3. Compute the **statewide reference rate** $r = \sum_i O_i / \sum_i P_i$, and
+   from it the **expected count** in each county, $E_i= r \times P_i$. Show that
+   $\sum_i E_i = \sum_i O_i$ and explain in one sentence why this must be so.
+**Total expected deaths need to equal total observed deaths because expected counts are calculated using the statewide mortality rate, which is based on the total observed deaths divided by the total population.**
+
+4. Compute the **SMR**, $O_i / E_i$.
+    a. Interpret the SMR of one county of your choice in a full sentence a
+       county commissioner could understand.
+
+**In Clinton County, the SMR is 0.50, which is 50% less than expected and because the confidence interval (0.32 and 0.74) and does not cross 1, this is significant and did not happen by chance so Clinton County did something right in terms of handling COVID-19.**
+
+    b. Divide each county's crude rate by the statewide rate and compare with the
+       SMR. Explain why they are identical here, and what $E_i$ would have to
+       take into account for the two to differ. *(This is where we are going
+       later in the semester.)*
+
+**There the same because we're essentially using the same formula for both, using observed deaths divided by county population for crude rate and for SMR using observed deaths divided by expected deaths. The expected deaths are calculated using only the statewide mortality rate and the county's total population. These could be different if we took into account different things like age, socioeconomic status, or race.**
+
+
+5. Compute an exact **95% confidence interval** for every SMR (formula below).
+   Compare the intervals for the two or three counties with the **fewest**
+   deaths with those of the counties with the **highest** SMRs. In three or four
+   sentences: what does this tell you about the extreme values on an SMR map?
+
+**The counties with the fewest deaths, also have very small populations. They seem to have very large confidence intervals that cross over 1, making them not statistically significant. But also, when reporting results, a small county with an unstable estimate may be better marked as not statistically significant, rather than presented as a reliable low-rate area.**
+
+::: {.callout-note}
+## Where the confidence interval comes from
+Treat the expected count $E$ as a fixed constant and the observed count as
+Poisson, $O \sim \text{Poisson}(\mu)$ with $\mu = \text{SMR} \times E$. We first
+find an exact 95% interval for $\mu$ and then divide both ends by $E$.
+
+The lower bound $\mu_L$ is the value of $\mu$ at which observing $O$ **or more**
+deaths has probability 0.025; the upper bound $\mu_U$ is the value at which
+observing $O$ **or fewer** has probability 0.025. Because of the link between the
+Poisson and chi-square distributions, both have a closed form:
+
+$$
+\mu_L = \tfrac{1}{2}\,\chi^2_{0.025,\;2O}, \qquad
+\mu_U = \tfrac{1}{2}\,\chi^2_{0.975,\;2(O+1)} .
+$$
+
+Dividing by $E$ gives the interval for the SMR:
+
+$$
+\left[\ \frac{\chi^2_{0.025,\,2O}}{2E}\ ,\ \ \frac{\chi^2_{0.975,\,2(O+1)}}{2E}\ \right].
+$$
+
+The upper bound uses $2(O+1)$ degrees of freedom and the lower bound $2O$; that
+asymmetry is what keeps the interval exact when counts are small. When $O = 0$
+the lower bound is 0.
+
+**Worked example.** A county with $O = 4$ and $E = 5.57$ has SMR $= 0.72$ and
+
+```r
+qchisq(0.025, 2 * 4)       / (2 * 5.57)   # 0.20
+qchisq(0.975, 2 * (4 + 1)) / (2 * 5.57)   # 1.84
+poisson.test(4, T = 5.57)$conf.int        # same interval: E acts as the "time base"
+```
+
+The familiar normal approximation, $\text{SMR} \times \exp(\pm 1.96/\sqrt{O})$,
+works for counties with many deaths but breaks down for the smallest ones ---
+which are exactly the counties this question is about --- and is undefined when
+$O = 0$.
+:::
+
+### Starting code
+
+```{r}
+#| label: c-starter
+
+# C1
+pa_covid <- pa_covid |>
+  mutate(crude_rate = 100000 * pa_covid$deaths_2020 / pa_covid$Population)
+
+pa_covid |>
+  slice_max(crude_rate, n = 3) |>
+  st_drop_geometry() |>
+  select(NAME, crude_rate)
+
+pa_covid |>
+  slice_min(crude_rate, n = 3) |>
+  st_drop_geometry() |>
+  select(NAME, crude_rate)
+
+
+
+
+
+```
+
+
+
+```{r}
+#| label: C-2
+
+
+# C2 -- counts as proportional symbols
+pts <- st_point_on_surface(pa_covid)        # one point inside each county
+
+p_count <- ggplot() +
+  geom_sf(data = pa_covid, fill = "grey95", colour = "grey70", linewidth = 0.15) +
+  geom_sf(data = pts, aes(size = deaths_2020),
+          shape = 21, fill = "firebrick", colour = "white", alpha = 0.7) +
+  scale_size_area(max_size = 14, name = "Deaths") +   # area proportional to count
+  labs(title = "Count of Covid-19 Deaths") +
+  theme_void()
+
+# rates as a choropleth
+
+p_rate <- ggplot(pa_covid) +
+  geom_sf(aes(fill = crude_rate), colour = "white", linewidth = 0.15) +
+  scale_fill_viridis_c(option = "magma", direction = -1, name = "Per 100,000") +
+  labs(title = "Crude rate of Covid-19 Deaths") +
+  theme_void()
+
+p_count + p_rate
+```
+
+
+```{r}
+#| label: C3
+
+
+# C3 -- one number for the whole state
+r <- sum(pa_covid$deaths_2020) / sum(pa_covid$Population)
+r * 100000                         # per 100,000
+
+pa_covid <- pa_covid |>
+  mutate(E = r * pa_covid$Population)
+
+sum(pa_covid$E); sum(pa_covid$deaths_2020)
+```
+
+
+
+```{r}
+#| label: C4
+
+
+# C4
+pa_covid <- pa_covid |>
+  mutate(SMR = pa_covid$deaths_2020 / E)
+
+```
+
+
+```{r}
+#| label: C-5
+
+# C5 -- exact Poisson interval
+pa_covid <- pa_covid |>
+  mutate(SMR_lo = qchisq(0.025, 2 * deaths_2020) / (2 * E),
+         SMR_hi = qchisq(0.975, 2 * (deaths_2020 + 1)) / (2 * E))
+
+pa_covid |>
+  st_drop_geometry() |>
+  arrange(deaths_2020) |>
+  select(NAME, Population, deaths_2020, E, SMR, SMR_lo, SMR_hi) |>
+  head(5)
+
+
+```
+
+---
+
+## Part D --- Mapping a ratio (3.5 points)
+
+In Exercise 1 a sequential palette was the right choice for a rate. An SMR is
+different: it is a ratio with a **meaningful reference value of 1**, and it is
+**multiplicative** --- an SMR of 2 is as far above expected as 0.5 is below it.
+
+1. Map the SMR as an interactive **`leaflet`** map with a **diverging palette
+   centred on 1** and **class breaks you set yourself**. Choose breaks that are
+   symmetric on the ratio scale, and make the class around 1 read as "about as
+   expected". Justify the palette and the breaks in three or four sentences.
+
+**I chose a diverging color palette because an SMR of 1 represents the expected number of deaths, with values above and below 1 showing higher or lower mortality. I used red for values above 1 because higher than expected mortality is a negative health outcome, blue for values below 1, and a neutral color for values around 1 since those are close to what was expected. The breaks are symmetric on a ratio scale, so values like 0.67 and 1.5 are equally different from 1. This makes it easier to see which counties had higher or lower mortality compared to the statewide rate.**
+
+2. Your SMR map meets the standards from Exercise 1 --- legend title with
+   units or meaning, thin boundaries, colour-blind-safe palette --- and in
+   addition:
+    - a **source line** on the map naming the data and the year;
+    - a **popup** for each county giving the observed and expected deaths, the
+      SMR, and its 95% interval from C5. This is what makes an interactive map
+      worth having: the reader can check how much evidence stands behind a
+      colour.
+
+::: {.callout-warning}
+## `leaflet` wants longitude and latitude
+Web maps are drawn on a Web Mercator basemap and expect coordinates in
+**EPSG:4326**. Your `pa_covid` is now projected (Part B), so give `leaflet` a
+transformed **copy**, `st_transform(pa_covid, 4326)`, and keep the projected
+object for everything else. Handing it projected coordinates is the most common
+reason for a blank `leaflet` map.
+:::
+
+::: {.callout-tip}
+## What earns full marks here
+Breaks that follow from what an SMR *means*, not from the distribution of the
+values. A student who can explain why 0.67 and 1.5 belong in the same break set
+understands the variable.
+:::
+
+### Starting code
+
+```{r}
+#| label: d-starter
+
+pa_wgs <- st_transform(pa_covid, 4326)      # leaflet needs lon/lat
+
+classIntervals(pa_covid$SMR, n = 5, style = "quantile")
+classIntervals(pa_covid$SMR, n = 5, style = "fisher")
+classIntervals(pa_covid$SMR, n = 5, style = "sd")
+classIntervals(pa_covid$SMR, n = 5, style = "equal")
+
+```
+
+
+
+```{r}
+#| label: d-1
+
+# D1 -- breaks symmetric on the ratio scale: 1/x and x
+brks <- c(0, 0.5, 0.67, 0.9, 1.1, 1.5, 2, Inf)
+
+pal <- colorBin("RdBu", domain = pa_wgs$SMR, bins = brks,
+                reverse = TRUE)             # red = high
+
+leaflet(pa_wgs) |>
+  addTiles() |>                               # OpenStreetMap basemap
+  addPolygons(
+    fillColor = ~pal(SMR), fillOpacity = 0.8,
+    color = "white", weight = 0.6,          # thin boundaries
+    label = ~NAME,                          # shown on hover
+    popup = ~sprintf("<b>%s County</b><br>Observed: %d<br>Expected: %.1f<br>SMR: %.2f (95%% CI %.2f–%.2f)",
+                     NAME, deaths_2020, E, SMR, SMR_lo, SMR_hi),
+    highlightOptions = highlightOptions(weight = 2, color = "black",
+                                        bringToFront = TRUE)
+  ) |>
+  addLegend(pal = pal, values = ~SMR, opacity = 0.8,
+            title = "SMR for COVID-19", labFormat = labelFormat(digits = 2)) |>
+  addControl("Dong, E., Du, H., & Gardner, L. (2020). An interactive web-based dashboard to track COVID-19 in real time. *The Lancet Infectious Diseases, 20*(5), 533--534, together with the repository URL: https://github.com/CSSEGISandData/COVID-19", position = "bottomleft")   # source line
+
+```
+
+::: {.callout-note}
+A `leaflet` map is an HTML widget: it appears in the rendered page on your
+GitHub Pages site, which is where I grade it. It will not appear in a PDF.
+:::
+
+---
+
+## Part E --- Spatial weights and global Moran's I (4 points)
+
+1. Build a **queen contiguity** neighbour list. Report the average number of
+   neighbours, the smallest and largest, and whether any county has none.
+
+**The average number of neighbors is 5.1, the most amount of neighbors is 9, and the least amount is 2. There are no counties without neighbors.** 
+
+2. Convert it to **row-standardized** spatial weights. One sentence: what does
+   row standardization do to a county's neighbours, and what does the spatial
+   lag of the SMR then represent?
+
+**Each county's neighbors gets equal weight and the weights sum to 1, so the neighbors value is their average and the spatial lag of a county is the average SMR of its neighbors.**
+
+3. Compute **global Moran's I** for the SMR by permutation with `moran.mc()`
+   (999 simulations; set a seed), and plot the permutation distribution with the
+   observed value marked. Report $I$, its expectation under the null hypothesis,
+   $-1/(n-1)$, and the $p$-value. In three or four sentences: what exactly is the
+   null hypothesis, how does the simulation test it, and is there a spatial
+   signal in the SMRs?
+
+**The null hypothesis is that the SMRs are random, there's no relationship between a county's SMR and their neighboring counties SMR. The simulation randomly generates SMRs 999 times and compares Moran's I values to observed value. Observed Moran's I was 0.29 and the expected value was -0.02, while the p-value was 0.001. There's a positive correlation, showing that counties that have similar SMRs are close to one another.**
+
+
+4. Draw the **Moran scatterplot**, with every county labelled and coloured by
+   quadrant. Name two or three counties in the high--high quadrant and two or
+   three in the low--low quadrant, say in one sentence what the slope of the fitted line is, and say in
+   one sentence what Moran's I does **not** tell you about these counties.
+
+**Bedford, Huntingdown, and Cambria are all in the high-high quadrant and Clearfield, Allegheny, and Potter are all in the low-low quadrant. The slope of the fitted line is positive, which shows that generally, counties with higher SMRs also have neighbors with higher SMRs. Moran's I doesn't tell which counties have clusters that are statistically significant or why the patterns happen.**
+
+### Starting code
+
+```{r}
+#| label: e-starter
+
+# E1
+nb <- poly2nb(pa_covid, queen = TRUE)
+summary(nb)
+
+
+```
+
+```{r}
+#| label: e-2
+
+# E2
+
+lw <- nb2listw(nb, style = "W")
+
+lw$weights[[i_leh]] 
+
+```
+
+```{r}
+#| label: e-3
+
+# E3 -- shuffle the SMRs across counties 999 times
+set.seed(374)
+mc <- moran.mc(pa_covid$SMR, lw, nsim = 999)
+mc
+
+-1 / (nrow(pa_covid) - 1)          # expectation under the null
+##This is the expected value of Moran's I under random spatial arrangement, not exactly zero.
+
+hist(mc$res, breaks = 40, main = "Permutation distribution of I", xlab = "I")
+abline(v = mc$statistic, col = "red", lwd = 2)
+
+
+
+```
+
+
+```{r}
+#| label: e-4
+
+# E4 -- moran.plot() labels only influential points; build it in ggplot2
+mp_df <- pa_covid |>
+  st_drop_geometry() |>
+  mutate(lag_SMR = lag.listw(lw, SMR),          # mean SMR of neighbours
+         quad = case_when(
+           SMR >= mean(SMR) & lag_SMR >= mean(SMR) ~ "High-High",
+           SMR <  mean(SMR) & lag_SMR <  mean(SMR) ~ "Low-Low",
+           SMR >= mean(SMR) & lag_SMR <  mean(SMR) ~ "High-Low",
+           TRUE                                    ~ "Low-High"))
+
+ggplot(mp_df, aes(SMR, lag_SMR)) +
+  geom_hline(yintercept = mean(mp_df$SMR), linetype = 2, colour = "grey60") +
+  geom_vline(xintercept = mean(mp_df$SMR), linetype = 2, colour = "grey60") +
+  geom_smooth(method = "lm", se = FALSE, colour = "black", linewidth = 0.5) +
+  geom_point(aes(colour = quad), size = 2) +
+  geom_text_repel(aes(label = NAME), size = 2.6, max.overlaps = Inf) +   # every county
+  labs(x = "County SMR", y = "Neighboring SMR", colour = NULL) +
+  theme_minimal()
+
+table(mp_df$quad)
+```
+
+---
+
+## Part F --- Reproducibility and AI use (1 point)
+
+1. The page renders from a clean session and is live on your GitHub Pages site.
+2. End the document with an **AI use note**: which tools, what for, at which
+   stage. Two or three sentences.
+**I used ChatGPT for part B, question 2, to understand which projection system to use and why. For part C, question 1, used ChatGPT to find top three highest and lowest. I also used ChatGPT for part E, question 4 to understand what Moran's I doesn't tell us.**
+
+```{r}
+#| label: f-starter
+
+sessionInfo()
+```
+
+---
+
+## Rubric
+
+| Part | What is assessed | Points |
+|---|---|---|
+| **A** | Mismatched rows found and explained; key built as text; join verified with code; left vs inner join explained | 3 |
+| **B** | Correct projected CRS, stated and justified | 1.5 |
+| **C** | Crude rates; count and rate maps compared; reference rate, expected counts and SMR correct; SMR interpreted; small-numbers argument made with intervals | 4.5 |
+| **D** | Diverging leaflet map centred on 1 with defended breaks; standards, source line and popup | 3.5 |
+| **E** | Weights built and described; Moran's I by permutation, null hypothesis stated and interpreted; scatterplot read | 4 |
+| **F** | Renders from a clean session; published; AI use note | 1 |
+| | **Total** | **17.5** |
+
+Writing counts for roughly 10% of the mark within each part. A submission that
+is all code and no sentences cannot score above about 60%.
+
+---
+
+## Getting help
+
+- Moraga §5.1--5.2 (expected counts and SMR) and §5.5 (neighbourhood matrices
+  in `spdep`).
+- The `spdep` vignette on neighbour objects: `vignette("nb", package = "spdep")`.
+- `?tigris::counties` if the download fails; the same boundaries can be
+  downloaded by hand from the Census Bureau's cartographic boundary page.
+- Office hours, or email me with the code and the exact error message. I am
+  travelling on October 13; email is the fastest route that week.
