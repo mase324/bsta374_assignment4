@@ -27,6 +27,8 @@ execute:
   echo: true
 ---
 
+Github: https://mase324.github.io/bsta374_assignment4/ 
+
 ## What this exercise is
 
 Exercises 1--3 ran on data that shipped inside an R package. This one does not.
